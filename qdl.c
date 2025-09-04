@@ -259,6 +259,14 @@ int main(int argc, char **argv)
 	if (ret)
 		goto out_cleanup;
 
+	/* Initialize device identification and timing */
+	if (serial) {
+		snprintf(qdl->device_serial, sizeof(qdl->device_serial), "%.8s", serial);
+	} else {
+		strcpy(qdl->device_serial, "DEFAULT");
+	}
+	qdl->start_time = time(NULL);
+
 	qdl->mappings[0] = prog_mbn;
 	ret = sahara_run(qdl, qdl->mappings, true, NULL, NULL);
 	if (ret < 0)
@@ -267,6 +275,12 @@ int main(int argc, char **argv)
 	ret = firehose_run(qdl, incdir, storage, allow_missing);
 	if (ret < 0)
 		goto out_cleanup;
+
+	/* Calculate and display completion time */
+	qdl->end_time = time(NULL);
+	time_t elapsed = qdl->end_time - qdl->start_time;
+	ux_device_info(qdl, "Flashing completed in %ld seconds (%.2f minutes)\n",
+		       elapsed, (double)elapsed / 60.0);
 
 out_cleanup:
 	if (vip_generate_dir)

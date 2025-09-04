@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 #include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -161,6 +163,140 @@ void ux_progress(const char *fmt, unsigned int value, unsigned int max, ...)
 	dashes = bar_length - bars;
 
 	printf("%-20.20s [%.*s%.*s] %1.2f%%%n\r", task_name,
+	       bars, progress_hashes,
+	       dashes, progress_dashes,
+	       percent * 100,
+	       &ux_cur_line_length);
+	fflush(stdout);
+
+	gettimeofday(&last_progress_update, NULL);
+}
+
+/* Device-specific output functions with serial prefixes */
+void ux_device_err(struct qdl_device *qdl, const char *fmt, ...)
+{
+	va_list ap;
+	char buffer[1024];
+
+	ux_clear_line();
+
+	va_start(ap, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, ap);
+	va_end(ap);
+
+	if (qdl && qdl->device_serial[0]) {
+		fprintf(stderr, "[%s] %s", qdl->device_serial, buffer);
+	} else {
+		fprintf(stderr, "%s", buffer);
+	}
+	fflush(stderr);
+}
+
+void ux_device_info(struct qdl_device *qdl, const char *fmt, ...)
+{
+	va_list ap;
+	char buffer[1024];
+
+	ux_clear_line();
+
+	va_start(ap, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, ap);
+	va_end(ap);
+
+	if (qdl && qdl->device_serial[0]) {
+		printf("[%s] %s", qdl->device_serial, buffer);
+	} else {
+		printf("%s", buffer);
+	}
+	fflush(stdout);
+}
+
+void ux_device_log(struct qdl_device *qdl, const char *fmt, ...)
+{
+	va_list ap;
+	char buffer[1024];
+
+	if (!qdl_debug)
+		return;
+
+	ux_clear_line();
+
+	va_start(ap, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, ap);
+	va_end(ap);
+
+	if (qdl && qdl->device_serial[0]) {
+		printf("[%s] %s", qdl->device_serial, buffer);
+	} else {
+		printf("%s", buffer);
+	}
+	fflush(stdout);
+}
+
+void ux_device_debug(struct qdl_device *qdl, const char *fmt, ...)
+{
+	va_list ap;
+	char buffer[1024];
+
+	if (!qdl_debug)
+		return;
+
+	ux_clear_line();
+
+	va_start(ap, fmt);
+	vsnprintf(buffer, sizeof(buffer), fmt, ap);
+	va_end(ap);
+
+	if (qdl && qdl->device_serial[0]) {
+		printf("[%s] %s", qdl->device_serial, buffer);
+	} else {
+		printf("%s", buffer);
+	}
+	fflush(stdout);
+}
+
+void ux_device_progress(struct qdl_device *qdl, const char *fmt, unsigned int value, unsigned int max, ...)
+{
+	static struct timeval last_progress_update;
+	unsigned long elapsed_us;
+	unsigned int bar_length;
+	unsigned int bars;
+	unsigned int dashes;
+	struct timeval now;
+	char task_name[32];
+	char prefix[40] = "";
+	float percent;
+	va_list ap;
+
+	/* Don't print progress is window is too narrow, or if stdout is redirected */
+	if (ux_width < 40)  /* Need more space for device prefix */
+		return;
+
+	/* Avoid updating the console more than UX_PROGRESS_REFRESH_RATE per second */
+	if (last_progress_update.tv_sec) {
+		gettimeofday(&now, NULL);
+		elapsed_us = (now.tv_sec - last_progress_update.tv_sec) * 1000000 +
+			     (now.tv_usec - last_progress_update.tv_usec);
+
+		if (elapsed_us < (1000000 / UX_PROGRESS_REFRESH_RATE))
+			return;
+	}
+
+	va_start(ap, max);
+	vsnprintf(task_name, sizeof(task_name), fmt, ap);
+	va_end(ap);
+
+	/* Create device prefix */
+	if (qdl && qdl->device_serial[0]) {
+		snprintf(prefix, sizeof(prefix), "[%s] ", qdl->device_serial);
+	}
+
+	bar_length = ux_width - (20 + 4 + 6 + strlen(prefix));
+	percent = (float)value / max;
+	bars = percent * bar_length;
+	dashes = bar_length - bars;
+
+	printf("%s%-20.20s [%.*s%.*s] %1.2f%%%n\r", prefix, task_name,
 	       bars, progress_hashes,
 	       dashes, progress_dashes,
 	       percent * 100,

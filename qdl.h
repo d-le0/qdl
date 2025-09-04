@@ -3,6 +3,7 @@
 #define __QDL_H__
 
 #include <stdbool.h>
+#include <time.h>
 
 #include "patch.h"
 #include "program.h"
@@ -49,6 +50,11 @@ struct qdl_device {
 	char *mappings[MAPPING_SZ]; // array index is the id from the device
 
 	struct vip_transfer_data vip_data;
+
+	/* Device identification and timing */
+	char device_serial[32];  /* Device serial number for output prefixing */
+	time_t start_time;       /* Process start time */
+	time_t end_time;         /* Process end time */
 };
 
 struct libusb_device_handle;
@@ -79,6 +85,13 @@ void ux_info(const char *fmt, ...);
 void ux_log(const char *fmt, ...);
 void ux_debug(const char *fmt, ...);
 void ux_progress(const char *fmt, unsigned int value, unsigned int size, ...);
+
+/* Device-specific output functions */
+void ux_device_err(struct qdl_device *qdl, const char *fmt, ...);
+void ux_device_info(struct qdl_device *qdl, const char *fmt, ...);
+void ux_device_log(struct qdl_device *qdl, const char *fmt, ...);
+void ux_device_debug(struct qdl_device *qdl, const char *fmt, ...);
+void ux_device_progress(struct qdl_device *qdl, const char *fmt, unsigned int value, unsigned int size, ...);
 
 void print_version(void);
 

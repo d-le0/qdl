@@ -28,6 +28,12 @@
 #include "vip.h"
 #include "sparse.h"
 
+/* Firehose retry configuration */
+#define FIREHOSE_MAX_WRITE_RETRIES 3
+#define FIREHOSE_RETRY_DELAY_MS 500
+#define FIREHOSE_BACKOFF_MULTIPLIER 2
+#define FIREHOSE_RECOVERY_TIMEOUT_MS 5000
+
 enum {
 	FIREHOSE_ACK = 0,
 	FIREHOSE_NAK,
@@ -353,6 +359,33 @@ out:
 	return ret == FIREHOSE_ACK ? 0 : -1;
 }
 
+/* Attempt to recover from USB write error by resynchronizing with device */
+static int firehose_recover_from_write_error(struct qdl_device *qdl)
+{
+	int recovery_attempts = 3;
+	int ret;
+
+	ux_device_info(qdl, "attempting to recover from USB write error...\n");
+
+	while (recovery_attempts-- > 0) {
+		/* Try to drain any pending responses */
+		ret = firehose_read(qdl, 1000, firehose_generic_parser, NULL);
+		if (ret == FIREHOSE_ACK) {
+			ux_device_info(qdl, "device responded with ACK during recovery\n");
+			return 0;
+		} else if (ret == FIREHOSE_NAK) {
+			ux_device_info(qdl, "device responded with NAK during recovery\n");
+			return -1;
+		}
+		/* Continue if we get EAGAIN (log messages) or timeout */
+
+		usleep(FIREHOSE_RETRY_DELAY_MS * 1000);
+	}
+
+	ux_device_err(qdl, "failed to recover device synchronization\n");
+	return -1;
+}
+
 static int firehose_program(struct qdl_device *qdl, struct program *program, int fd)
 {
 	unsigned int num_sectors;
@@ -482,18 +515,50 @@ static int firehose_program(struct qdl_device *qdl, struct program *program, int
 
 			vip_transfer_clear_status(qdl);
 		}
-		n = qdl_write(qdl, buf, chunk_size * program->sector_size);
-		if (n < 0) {
-			ux_err("USB write failed for data chunk\n");
-			ret = firehose_read(qdl, 30000, firehose_generic_parser, NULL);
-			if (ret)
-				ux_err("flashing of chunk failed\n");
 
-			goto out;
+		/* Enhanced write with retry logic */
+		int write_retries = 0;
+		int write_success = 0;
+
+		while (write_retries <= FIREHOSE_MAX_WRITE_RETRIES && !write_success) {
+			n = qdl_write(qdl, buf, chunk_size * program->sector_size);
+
+			if (n < 0) {
+				write_retries++;
+				ux_device_err(qdl, "USB write failed for data chunk (attempt %d/%d)\n",
+				       write_retries, FIREHOSE_MAX_WRITE_RETRIES + 1);
+
+				if (write_retries <= FIREHOSE_MAX_WRITE_RETRIES) {
+					/* Attempt recovery */
+					ret = firehose_recover_from_write_error(qdl);
+					if (ret == 0) {
+						/* Recovery successful, retry the write */
+						ux_device_info(qdl, "recovery successful, retrying write...\n");
+						usleep(FIREHOSE_RETRY_DELAY_MS * 1000 * write_retries);
+						continue;
+					} else {
+						ux_device_err(qdl, "recovery failed, aborting write retries\n");
+						break;
+					}
+				}
+			} else if (n != chunk_size * program->sector_size) {
+				ux_device_err(qdl, "USB write truncated (got %d, expected %lu)\n",
+				       n, chunk_size * program->sector_size);
+				write_retries++;
+				if (write_retries <= FIREHOSE_MAX_WRITE_RETRIES) {
+					ux_device_info(qdl, "retrying truncated write...\n");
+					usleep(FIREHOSE_RETRY_DELAY_MS * 1000 * write_retries);
+					continue;
+				}
+			} else {
+				/* Write successful */
+				write_success = 1;
+			}
 		}
 
-		if (n != chunk_size * program->sector_size) {
-			ux_err("USB write truncated\n");
+		if (!write_success) {
+			ux_device_err(qdl, "failed to write data chunk after %d attempts\n",
+			       FIREHOSE_MAX_WRITE_RETRIES + 1);
 			ret = -1;
 			goto out;
 		}
@@ -501,7 +566,12 @@ static int firehose_program(struct qdl_device *qdl, struct program *program, int
 		left -= chunk_size;
 		vip_gen_chunk_store(qdl);
 
-		ux_progress("%s", num_sectors - left, num_sectors, program->label);
+		ux_device_progress(qdl, "%s", num_sectors - left, num_sectors, program->label);
+
+		/* Add small delay between chunks to reduce USB contention */
+		if (left > 0) {
+			usleep(2000); /* 2ms delay between chunks */
+		}
 	}
 
 	t = time(NULL) - t0;
@@ -510,11 +580,11 @@ static int firehose_program(struct qdl_device *qdl, struct program *program, int
 	if (ret) {
 		ux_err("flashing of %s failed\n", program->label);
 	} else if (t) {
-		ux_info("flashed \"%s\" successfully at %lukB/s\n",
+		ux_device_info(qdl, "flashed \"%s\" successfully at %lukB/s\n",
 			program->label,
 			(unsigned long)program->sector_size * num_sectors / t / 1024);
 	} else {
-		ux_info("flashed \"%s\" successfully\n",
+		ux_device_info(qdl, "flashed \"%s\" successfully\n",
 			program->label);
 	}
 
@@ -787,7 +857,7 @@ static int firehose_set_bootable(struct qdl_device *qdl, int part)
 		return -1;
 	}
 
-	ux_info("partition %d is now bootable\n", part);
+	ux_device_info(qdl, "partition %d is now bootable\n", part);
 	return 0;
 }
 
@@ -827,7 +897,7 @@ int firehose_run(struct qdl_device *qdl, const char *incdir,
 	int bootable;
 	int ret;
 
-	ux_info("waiting for programmer...\n");
+	ux_device_info(qdl, "waiting for programmer...\n");
 
 	firehose_read(qdl, 5000, firehose_generic_parser, NULL);
 
@@ -839,9 +909,9 @@ int firehose_run(struct qdl_device *qdl, const char *incdir,
 					       firehose_apply_ufs_body,
 					       firehose_apply_ufs_epilogue);
 		if (!ret)
-			ux_info("UFS provisioning succeeded\n");
+			ux_device_info(qdl, "UFS provisioning succeeded\n");
 		else
-			ux_info("UFS provisioning failed\n");
+			ux_device_info(qdl, "UFS provisioning failed\n");
 
 		firehose_reset(qdl);
 
@@ -873,7 +943,7 @@ int firehose_run(struct qdl_device *qdl, const char *incdir,
 		ux_debug("no boot partition found\n");
 	} else {
 		if (multiple) {
-			ux_info("Multiple candidates for primary bootloader found, using partition %d\n",
+			ux_device_info(qdl, "Multiple candidates for primary bootloader found, using partition %d\n",
 				bootable);
 		}
 		firehose_set_bootable(qdl, bootable);
